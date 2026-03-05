@@ -1,0 +1,117 @@
+function fetchYouTubeAndAnalyze() {
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName("Results");
+  const sourceSheet = ss.getSheetByName("Sources");
+
+  if (!sourceSheet) throw new Error("Sources sheet not found");
+  if (!sheet) throw new Error("Results sheet not found");
+
+  const openRouterKey = "API_KEY";
+
+  const rssFeeds = sourceSheet.getRange("A2:A").getValues().flat().filter(String);
+
+  let emailReport = "";
+
+  for (let f = 0; f < rssFeeds.length; f++) {
+
+    const rssUrl = rssFeeds[f];
+
+    const response = UrlFetchApp.fetch(rssUrl);
+    const xml = response.getContentText();
+
+    const document = XmlService.parse(xml);
+    const root = document.getRootElement();
+    const ns = root.getNamespace();
+
+    const entries = root.getChildren("entry", ns);
+
+    if (entries.length === 0) continue;
+
+    // analyze latest 3 videos
+    for (let i = 0; i < Math.min(3, entries.length); i++) {
+
+      const entry = entries[i];
+
+      const title = entry.getChild("title", ns).getText();
+      const link = entry.getChild("link", ns).getAttribute("href").getValue();
+      const author = entry.getChild("author", ns).getChild("name", ns).getText();
+
+      const existingLinks = sheet.getRange("B:B").getValues().flat();
+      if (existingLinks.includes(link)) continue;
+
+      const prompt = `
+You are a viral content strategist.
+
+Analyze this YouTube video:
+Title: ${title}
+
+Return ONLY valid JSON in this format:
+
+{
+"topic": "",
+"hook": "",
+"script": "",
+"viral_score": ""
+}
+`;
+
+      const responseAI = UrlFetchApp.fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "post",
+        contentType: "application/json",
+        headers: {
+          "Authorization": "Bearer " + openRouterKey,
+          "HTTP-Referer": "https://google.com",
+          "X-Title": "AIContentEngine"
+        },
+        payload: JSON.stringify({
+          model: "openai/gpt-3.5-turbo",
+          messages: [{ role: "user", content: prompt }]
+        })
+      });
+
+      const result = JSON.parse(responseAI.getContentText());
+      const textOutput = result.choices[0].message.content;
+
+      const cleaned = textOutput.replace(/```json|```/g, "").trim();
+      const cleanJson = JSON.parse(cleaned);
+
+      const score = parseInt(cleanJson.viral_score);
+
+      if (isNaN(score) || score < 7) continue;
+
+      sheet.appendRow([
+        author,
+        link,
+        cleanJson.topic,
+        score,
+        cleanJson.hook,
+        "YouTube",
+        cleanJson.script,
+        "New",
+        new Date()
+      ]);
+
+      emailReport +=
+        "Creator: " + author + "\n" +
+        "Topic: " + cleanJson.topic + "\n" +
+        "Hook: " + cleanJson.hook + "\n" +
+        "Score: " + score + "\n" +
+        "Video: " + link + "\n\n";
+
+    }
+
+  }
+
+  // Send one summary email
+  if (emailReport !== "") {
+
+    MailApp.sendEmail({
+      to: "nssceiotlab@gmail.com",
+      subject: "Hourly Viral Content Ideas Report",
+      body: emailReport
+    });
+
+  }
+
+}
